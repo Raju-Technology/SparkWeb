@@ -1,82 +1,106 @@
-import {useRef,useEffect} from 'react'
-import './App.css'
-import * as faceapi from 'face-api.js'
+import React, { useState, useEffect } from 'react';
+import Webcam from 'react-webcam';
+import * as faceapi from 'face-api.js';
+import { db, collection, addDoc, getDocs } from './config';
 
-function App(){
-  const videoRef = useRef()
-  const canvasRef = useRef()
+const App = () => {
+  const [webcamRef, setWebcamRef] = useState(null);
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [recognizedPlayer, setRecognizedPlayer] = useState(null);
 
-  // LOAD FROM USEEFFECT
-  useEffect(()=>{
-    startVideo()
-    videoRef && loadModels()
+  useEffect(() => {
+    const loadModels = async () => {
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
+        faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+        faceapi.nets.faceRecognitionNet.loadFromUri('/models'),
+        faceapi.nets.faceExpressionNet.loadFromUri('/models'),
+        faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
+      ]);
 
-  },[])
+      setModelLoaded(true);
+    };
 
+    loadModels();
+  }, []);
 
+  const recognizeFace = async () => {
+    if (!modelLoaded) {
+      console.error('Models not loaded yet.');
+      return;
+    }
 
-  // OPEN YOU FACE WEBCAM
-  const startVideo = ()=>{
-    navigator.mediaDevices.getUserMedia({video:true})
-    .then((currentStream)=>{
-      videoRef.current.srcObject = currentStream
-    })
-    .catch((err)=>{
-      console.log(err)
-    })
-  }
-  // LOAD MODELS FROM FACE API
+    const video = webcamRef?.video;
 
-  const loadModels = ()=>{
-    Promise.all([
-      // THIS FOR FACE DETECT AND LOAD FROM YOU PUBLIC/MODELS DIRECTORY
-      faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
-      faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
-      faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
-      faceapi.nets.faceExpressionNet.loadFromUri("/models")
+    if (!video || !(video instanceof HTMLVideoElement)) {
+      console.error('Invalid media type. Expected HTMLVideoElement.');
+      return;
+    }
 
-      ]).then(()=>{
-      faceMyDetect()
-    })
-  }
+    const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+      .withFaceLandmarks()
+      .withFaceDescriptors()
+      .withFaceExpressions();
 
-  const faceMyDetect = ()=>{
-    setInterval(async()=>{
-      const detections = await faceapi.detectAllFaces(videoRef.current,
-        new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceExpressions()
+    if (detections.length > 0) {
+      const faceDescriptor = Array.from(detections[0].descriptor); // Convert to array
 
-      // DRAW YOU FACE IN WEBCAM
-      canvasRef.current.innerHtml = faceapi.createCanvasFromMedia(videoRef.current)
-      faceapi.matchDimensions(canvasRef.current,{
-        width:940,
-        height:650
-      })
+      // Check if the face exists in the Firestore database
+      const querySnapshot = await getDocs(collection(db, 'Players'));
 
-      const resized = faceapi.resizeResults(detections,{
-         width:940,
-        height:650
-      })
+      let recognizedPlayer = null;
 
-      faceapi.draw.drawDetections(canvasRef.current,resized)
-      faceapi.draw.drawFaceLandmarks(canvasRef.current,resized)
-      faceapi.draw.drawFaceExpressions(canvasRef.current,resized)
+      querySnapshot.forEach((doc) => {
+        const { name, notes, faceDescriptor: storedFaceDescriptor } = doc.data();
 
+        // Check if storedFaceDescriptor is a valid array
+        if (storedFaceDescriptor && storedFaceDescriptor.length) {
+          const distance = faceapi.euclideanDistance(faceDescriptor, storedFaceDescriptor);
 
-    },1000)
-  }
+          if (distance < 0.6) {
+            console.log('Player recognized:', doc.data());
+            recognizedPlayer = { name, notes };
+          }
+        }
+      });
+
+      if (!recognizedPlayer) {
+        // If face not found, add the new face
+        const playerName = 'New Person';
+        const playerNotes = 'No Notes added';
+
+        await addDoc(collection(db, 'Players'), {
+          faceDescriptor,
+          name: playerName,
+          notes: playerNotes,
+        });
+
+        console.log('New player added to the Players collection.');
+      }
+
+      setRecognizedPlayer(recognizedPlayer);
+    } else {
+      console.log('No face detected.');
+      setRecognizedPlayer(null); // Reset recognized player state
+    }
+  };
 
   return (
-    <div className="myapp">
-    <h1>FAce Detection</h1>
-      <div className="appvide">
-        
-      <video crossOrigin="anonymous" ref={videoRef} autoPlay></video>
+    <div>
+      <h1>Scan Page</h1>
+      {modelLoaded ? <Webcam ref={(ref) => setWebcamRef(ref)} /> : 'Loading models...'}
+      <div>
+        <button onClick={recognizeFace}>Capture and Identify</button>
+        {recognizedPlayer && (
+          <div>
+            <h2>Player Recognized:</h2>
+            <p>Name: {recognizedPlayer.name}</p>
+            <p>Notes: {recognizedPlayer.notes}</p>
+          </div>
+        )}
       </div>
-      <canvas ref={canvasRef} width="940" height="650"
-      className="appcanvas"/>
     </div>
-    )
-
-}
+  );
+};
 
 export default App;
